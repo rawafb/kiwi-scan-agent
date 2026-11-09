@@ -1,0 +1,132 @@
+# Scan configuration: active values below are default values.
+# jog: null is the actuator default; its example expands JogConfig.
+# Plugin parameters and monitor settings are implementation-specific.
+# The monitor example does not list monitor specs jet. 
+# parallel_scans/nested_scans use scan_dimensions but this design is obsolete.
+
+actuators: {}
+# Example: actuators
+# actuators:
+#   axis:
+#     pv: EXAMPLE:MOTOR
+#     type: epics
+#     rel_pv: null
+#     rb_pv: null
+#     cmd_pv: null
+#     cmdvel_pv: null
+#     stop_pv: null
+#     stop_command: 0.0
+#     status_pv: null
+#     queueing_delay: 0.01
+#     ca_timeout: 1.0
+#     auto_monitor: true
+#     startup_timeout: 1.0
+#     in_position_band: -1.0
+#     dwell_time: 1.0
+#     ready_value: 0
+#     ready_bitmask: 0
+#     backlash: 0.0
+#     start_pv: null
+#     start_command: 0.0
+#     velocity_pv: null
+#     get_velocity_pv: null
+#     velocity: 0.0
+#     jog:
+#       velocity_pv: null
+#       abs_velocity: false
+#       command_pv: null
+#       command_pos: null
+#       command_neg: null
+
+detector_pvs: []
+# Example: detector_pvs
+# detector_pvs:
+# - EXAMPLE:DETECTOR
+
+detector_pvs_monitor: true
+
+scan_dimensions: null
+# Example: scan_dimensions
+# scan_dimensions:
+# - actuator: axis
+#   start: 0.0
+#   stop: 1.0
+#   steps: 5
+#   velocity: 0.0
+
+parallel_scans: null
+
+nested_scans: null
+
+plugin_configs: []
+# Example: plugin_configs
+# plugin_configs:
+# - type: LoggingPlugin
+#   name: null
+#   parameters: {}
+
+monitor_type: null
+
+monitor: {}
+# Example: monitor
+# monitor_type: print
+# monitor: {}
+
+stop_pv: null
+
+data_dir: .
+
+output_file: scan_results.txt
+
+include_timestamps: false
+
+timestamp_output_format: iso8601
+
+integration_time: 0.0
+
+sample_rate_hz: 1.0
+
+debug: false
+
+performance_report: false
+
+data_writing_enabled: true
+
+manifest_mode: full
+
+triggers: null
+# Example: triggers
+# triggers:
+#   before:
+#   - pv: EXAMPLE:TRIGGER
+#     value: 1
+#     delay: 0.0
+#   on_point: []
+#   after: []
+#   monitor: []
+
+metadata_pvs: []
+# Example: metadata_pvs
+# metadata_pvs:
+# - EXAMPLE:METADATA
+
+metadata_constants: {}
+# Example: metadata_constants
+# metadata_constants:
+#   example_key: example_value
+
+metadata_file: scan_metadata.txt
+
+subscriptions: []
+# Example: subscriptions
+# subscriptions:
+# - name: example_sync
+#   role: sync
+#   pv: EXAMPLE:SYNC
+#   actuator: null
+#   source: null
+#   timeout: null
+
+detector_reader_strategy: direct
+
+detector_read_timeout: null

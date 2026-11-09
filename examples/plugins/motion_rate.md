@@ -1,9 +1,9 @@
 # MotionRatePlugin
 
 `MotionRatePlugin` is an example [async plugin](../../docs/async_plugins.md).
-It estimates how fast one scan signal changes, for example the energy
-readback during a continuous-motion scan, and writes the result as extra
-scan columns.
+It estimates how fast one scan signal changes, for example the low resolution encoder
+readback of the undulator gap during a continuous-motion scan, 
+and writes the result as extra scan columns.
 
 For each scan point the plugin takes the value of the row key `signal` and its
 detector timestamp `TS-<signal>`, adds the pair to a sliding window of the last

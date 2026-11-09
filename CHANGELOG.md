@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-09
+
 ### Added
 
 - Added the `kiwi-get` cli: one-shot read of the detector PVs from a YAML config
