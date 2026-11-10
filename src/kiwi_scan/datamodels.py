@@ -12,6 +12,24 @@ logger = logging.getLogger(__name__)
 class ConfigError(ValueError):
     """Raised when raw scan configuration data is invalid."""
 
+
+def _finite_non_negative(name: str, value: Any) -> float:
+    """
+    Return ``value`` as float or raise ConfigError.
+    Accepts: ints, floats and numeric strings. 
+    Rejects: bool, None, NaN, infinities and negative values.
+    """
+    if isinstance(value, bool):
+        raise ConfigError(f"{name} must be a finite number >= 0, got bool {value!r}")
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ConfigError(f"{name} must be a finite number >= 0, got {value!r}") from exc
+    if not math.isfinite(result) or result < 0:
+        raise ConfigError(f"{name} must be a finite number >= 0, got {value!r}")
+    return result
+
+
 def filter_known_fields(cls, data: Dict[str, Any]) -> Dict[str, Any]:
     """Filter out unknown fields from a dict for a given dataclass."""
     known_fields = {f.name for f in fields(cls)}
@@ -55,6 +73,14 @@ class ActuatorConfig:
     get_velocity_pv: Optional[str] = None
     velocity: float = 0.0
     jog: Optional[JogConfig] = None
+    put_timeout: float = 0.0
+
+    def __post_init__(self) -> None:
+        # TODO: validate the other numeric fields (ca_timeout, startup_timeout,
+        #       dwell_time, queueing_delay, in_position_band, ...) with
+        #       _finite_non_negative() or a range-aware variant.
+        # Only values are checked here, not feature combinations.
+        self.put_timeout = _finite_non_negative("put_timeout", self.put_timeout)
 
     def resolve_pv(self, source: str) -> str:
         """Resolve an actuator source name to a configured PV name."""

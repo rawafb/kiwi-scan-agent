@@ -12,7 +12,7 @@ from kiwi_scan.actuator.single import (
     _close_created_pvs,
 )
 from kiwi_scan.datamodels import ActuatorConfig
-from kiwi_scan.epics_wrapper import EpicsPV
+from kiwi_scan.epics_wrapper import EpicsPV, PutCompletion
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +24,8 @@ class EpicsActuator(AbstractActuator):
     def __init__(self, config: ActuatorConfig):
         super().__init__(config)
 
+        # Latest put request, shared with status checks and stop().
+        self._pending_put: Optional[PutCompletion] = None
         # PVs owned by this actuator; close() releases them in reverse order
         created_pvs: List[EpicsPV] = []
         self._owned_pvs = created_pvs
@@ -67,6 +69,9 @@ class EpicsActuator(AbstractActuator):
             self.backlash = config.backlash
             self.velocity = config.velocity
             self.start_command = config.start_command
+            self.put_timeout = config.put_timeout
+            if self.put_timeout > 0:
+                logger.debug("[%s] main-PV put completion enabled (timeout %.3fs)", self.pvname, self.put_timeout)
 
             # Validate PV connections
             self._check_pvs()
@@ -76,6 +81,9 @@ class EpicsActuator(AbstractActuator):
 
     def close(self) -> None:
         """Remove all monitors and close every PV owned by the actuator. Idempotent."""
+        pending = self._pending_put
+        if pending is not None:
+            pending.cancel()
         self.clear_monitors()
         owned, self._owned_pvs = self._owned_pvs, []
         _close_created_pvs(owned)
@@ -323,14 +331,30 @@ class EpicsActuator(AbstractActuator):
         return None
 
     def _issue_move(self, position: float) -> None:
+        """
+        Write the main setpoint. This method never waits for motion.
+
+        With ``put_timeout > 0`` the write uses a CA put callback, for records with asynchronous processing. 
+        The request is kept in ``self._pending_put``: while it is pending, 
+        ``is_ready()`` is False and ``is_moving()`` is True, and ``wait_until_done()`` waits for it.
+        A configured ``start_pv`` is written after submitting the setpoint and before any completion wait. 
+        """
         if not self.pv:
-            logger.error( "Cannot issue move to %r: setter PV is not configured", position)
+            logger.error("Cannot issue move to %r: setter PV is not configured", position)
             return
 
         logger.info("[%s] move to %f", self.pvname, position)
-        success = self.pv.put(position)
+        if self.put_timeout > 0:
+            previous = self._pending_put
+            if previous is not None and previous.pending:
+                logger.debug("[%s] new move while previous put is still processing", self.pvname)
+            completion = self.pv.put_with_completion(position, timeout=self.put_timeout)
+            self._pending_put = completion
+            success = not completion.failed
+        else:
+            success = self.pv.put(position)
         if not success:
-            logger.error(f"Failed to write position to {self.pvname}")
+            logger.error("Failed to write position to %s", self.pvname)
         self.start_actuator()
         time.sleep(self.q_delay)
 
@@ -345,6 +369,8 @@ class EpicsActuator(AbstractActuator):
         """
         if self.rel_pv is not None:
             logger.info(f"[{self.pvname}] rel-move by {delta}")
+            # rel_pv writes are plain puts
+            self._pending_put = None
             success = self.rel_pv.put(delta)
             if not success:
                 logger.error("Failed to write relative move %r to %s", delta, self.rel_pv.pvname)
@@ -497,7 +523,13 @@ class EpicsActuator(AbstractActuator):
             True:  status was read successfully and decodes as ready.
             False: status was read successfully and decodes as not ready.
             None:  status is unknown, for example during a short CA disconnect.
+
+        A pending main-PV put completion counts as not ready (busy).
         """
+        pending = self._pending_put
+        if pending is not None and pending.pending:
+            return False
+
         if not self.status_pv:
             return True
 
@@ -627,11 +659,7 @@ class EpicsActuator(AbstractActuator):
         self.dwell()
         return True
     
-    def wait_until_done(
-        self,
-        position: float,
-        stop_event: Optional[threading.Event] = None,
-    ) -> None:
+    def wait_until_done(self, position: float, stop_event: Optional[threading.Event] = None) -> None:
         has_status = bool(self.status_pv)
         has_band = self.in_pos_band >= 0
         t0 = time.time()
@@ -641,7 +669,22 @@ class EpicsActuator(AbstractActuator):
                 logger.info(f"[{self.pvname}] wait aborted before start")
                 return
 
-            if has_status:
+            # A completed put with completion means motion has already started and ended.
+            put_completed = False
+            completion = self._pending_put
+            if completion is not None:
+                put_completed = completion.wait(stop_event=stop_event)
+                if self._stop_requested(stop_event) or completion.cancelled:
+                    logger.info("[%s] wait aborted during put completion", self.pvname)
+                    return
+
+            if has_status and put_completed:
+                logger.debug("[%s] put completed; skipping startup wait", self.pvname)
+                self._wait_for_condition(self.is_ready, stop_event=stop_event)
+                if self._stop_requested(stop_event):
+                    logger.info(f"[{self.pvname}] wait aborted after status wait")
+                    return
+            elif has_status:
                 self.wait_for_startup_and_done(stop_event=stop_event)
                 if self._stop_requested(stop_event):
                     logger.info(f"[{self.pvname}] wait aborted after status wait")
@@ -673,6 +716,11 @@ class EpicsActuator(AbstractActuator):
 
 
     def stop(self) -> None:
+        # Release waiters and clear the busy state first; 
+        # stop() may be called from another thread (e.g. Ctrl-C handling).
+        pending = self._pending_put
+        if pending is not None:
+            pending.cancel()
         if self.stop_pv:
             success = self.stop_pv.put(self.config.stop_command)
             if not success:

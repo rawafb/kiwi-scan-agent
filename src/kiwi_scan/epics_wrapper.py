@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from typing import Any, Callable, Dict, Optional
@@ -12,6 +13,108 @@ import epics
 
 logger = logging.getLogger(__name__)
 _CA_LOCK = threading.Lock()
+
+
+class PutCompletion:
+    """
+    Tracks one CA put-callback request (``ca_array_put_callback``).
+
+    The IOC sends the callback after the record, including asynchronous
+    device support and forward links, has finished processing the write.
+    The timeout runs from the submission (creation of this object), so
+    ``pending`` and ``wait()`` share the same deadline.
+
+    States:
+      - completed: the callback arrived.
+      - failed:    submission raised; no callback will arrive.
+      - unarmed:   CA did not accept the request (e.g. not connected);
+                   no callback will arrive, but the put is not reported
+                   as failed (same reporting as ``EpicsPV.put()``).
+      - cancelled: ``cancel()`` was called, e.g. by ``Actuator.stop()``.
+    """
+
+    def __init__(self, pvname: str, timeout: float):
+        timeout = float(timeout)
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError(f"put completion timeout must be finite and non-negative, got {timeout!r}")
+        self.pvname = pvname
+        self.timeout = timeout
+        self._deadline = time.monotonic() + timeout
+        self._event = threading.Event()
+        self._completed = False
+        self._failed = False
+        self._unarmed = False
+        self._cancelled = False
+
+    @property
+    def failed(self) -> bool:
+        """True if the submission raised; no callback will arrive."""
+        return self._failed
+
+    @property
+    def completed(self) -> bool:
+        """True if the IOC reported completion (and nothing overrode it)."""
+        return self._completed and not (self._failed or self._unarmed or self._cancelled)
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled
+
+    @property
+    def pending(self) -> bool:
+        """True while a callback is still expected and the deadline has not passed."""
+        if self._event.is_set():
+            return False
+        return time.monotonic() < self._deadline
+
+    def callback(self, **_kwargs: Any) -> None:
+        """CA-thread callback: signal completion."""
+        self._completed = True
+        self._event.set()
+
+    def fail(self) -> None:
+        """Set submission failure and release any waiter."""
+        self._failed = True
+        self._event.set()
+
+    def mark_unarmed(self) -> None:
+        """No callback will arrive, but do not report a failed put."""
+        self._unarmed = True
+        self._event.set()
+
+    def cancel(self) -> None:
+        """Stop waiting and stop reporting this put as pending. Safe from any thread."""
+        self._cancelled = True
+        self._event.set()
+
+    def wait(self, stop_event: Optional[threading.Event] = None) -> bool:
+        """
+        Wait for completion until the deadline.
+
+        Returns:
+            - True on completion
+            - False on failure, missing callback, cancellation, stop request or timeout
+        """
+        logger.debug("Waiting for put completion on %s (timeout %.3fs)", self.pvname, self.timeout)
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                logger.debug("Put completion wait stopped for %s", self.pvname)
+                return False
+            if self._cancelled:
+                logger.debug("Put completion cancelled for %s", self.pvname)
+                return False
+            if self._failed or self._unarmed:
+                logger.debug("No put completion expected for %s", self.pvname)
+                return False
+            if self._completed:
+                logger.debug("Put completed on %s", self.pvname)
+                return True
+            remaining = self._deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning("Put completion for %s not reached within %.3fs", self.pvname, self.timeout)
+                return False
+            # Short slices keep stop_event responsive without a second event.
+            self._event.wait(min(0.05, remaining))
 
 
 def ensure_ca_context() -> None:
@@ -206,7 +309,42 @@ class EpicsPV:
         except Exception as e: # noqa BLE001
             logger.error("Failed to set PV %s to %r: %s", self.pvname, v, e)
             return False
-    
+
+    def put_with_completion(self, value: Any, *, timeout: float) -> PutCompletion:
+        """
+        Submit a non-blocking put with a CA completion callback.
+
+        Returns a PutCompletion that reports when the IOC has finished processing the write. 
+        Failure reporting matches ``put()``: only an exception counts as a failed put.
+
+        TODO: a callback that never arrives (e.g. after a timeout or a cancel) 
+              stays registered in pyepics (``ca._put_completes``) until the channel is cleared.
+        """
+        completion = PutCompletion(self.pvname, timeout)
+        pv = self._require_pv()
+        v = value
+        tolist = getattr(v, "tolist", None)
+        if callable(tolist):
+            v = tolist()
+        try:
+            result = pv.put(v, wait=False, callback=completion.callback)
+            # pyepics returns None when the channel is not connected; 
+            # CA errors: do not report this as a failed write, but do not wait for a callback that cannot arrive.
+            # TODO: pass errors here?
+            if result is None or result <= 0:
+                completion.mark_unarmed()
+                logger.debug("Put to %s = %r has no completion callback (status %r)",
+                             self.pvname, v, result)
+            else:
+                logger.debug("Submitted put to %s = %r with completion callback", self.pvname, v)
+            self.last_written = v
+            if self.queueing_delay > 0:
+                time.sleep(self.queueing_delay)
+        except Exception as exc:  # noqa: BLE001 - match ordinary put failure handling
+            completion.fail()
+            logger.error("Failed to set PV %s to %r with completion: %s", self.pvname, v, exc)
+        return completion
+
     def add_callback(self, callback: Callable[..., None], **kwargs: Any) -> int:
         pv = self._require_pv()
         wrapped = self._wrap_callback(callback)
